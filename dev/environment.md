@@ -21,8 +21,7 @@ pip install --upgrade pip
 Then install
 ```
 cd vllm
-pip install -r requirements.txt
-python setup.py install
+pip install -e .
 ```
 
 We need to bring `pydantic` to 1.10.8:
@@ -44,3 +43,10 @@ We can then run
 ```
 RAY_DEDUP_LOGS=0 python examples/benchmark.py --use-dummy-weights --model=WizardLM/WizardCoder-Python-34B-V1.0 -tp 2
 ```
+## Develop
+
+It is faster to just run
+```
+python setup.py install
+```
+when there is code change
