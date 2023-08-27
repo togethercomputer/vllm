@@ -21,7 +21,7 @@ pip install --upgrade pip
 Then install
 ```
 cd vllm
-pip install -e .
+pip install -r requirements.txt
 python setup.py install
 ```
 
