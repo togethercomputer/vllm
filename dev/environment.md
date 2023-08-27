@@ -21,7 +21,7 @@ pip install --upgrade pip
 Then install
 ```
 cd vllm
-pip install -e .
+python setup.py install
 ```
 
 We need to bring `pydantic` to 1.10.8:
