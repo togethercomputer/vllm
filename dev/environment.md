@@ -35,5 +35,5 @@ pip install pydantic==1.10.8
 We can then run
 
 ```
-python examples/benchmark.py --use-dummy-weights --model=WizardLM/WizardCoder-Python-34B-V1.0 -tp 2
+RAY_DEDUP_LOGS=0 python examples/benchmark.py --use-dummy-weights --model=WizardLM/WizardCoder-Python-34B-V1.0 -tp 2
 ```
