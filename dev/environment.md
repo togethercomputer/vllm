@@ -23,3 +23,17 @@ Then install
 cd vllm
 pip install -e .
 ```
+
+We need to bring `pydantic` to 1.10.8:
+
+```
+pip install pydantic==1.10.8
+```
+
+## Benchmark
+
+We can then run
+
+```
+python examples/benchmark.py --use-dummy-weights --model=WizardLM/WizardCoder-Python-34B-V1.0 -tp 2
+```
