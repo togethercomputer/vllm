@@ -21,6 +21,7 @@ pip install --upgrade pip
 Then install
 ```
 cd vllm
+pip install -e .
 python setup.py install
 ```
 
