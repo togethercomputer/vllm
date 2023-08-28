@@ -30,12 +30,6 @@ We need to bring `pydantic` to 1.10.8:
 pip install pydantic==1.10.8
 ```
 
-We now also need cupy
-
-```
-pip install cupy-cuda11x
-```
-
 ## Benchmark
 
 We can then run
