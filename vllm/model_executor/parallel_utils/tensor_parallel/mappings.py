@@ -32,12 +32,12 @@ def _reduce(input_):
     ## -- CZ
     ##
 
-    #assert (input_.dtype == torch.float16)
-    #
-    #torch.distributed.ncclcomm.allReduce(
-    #    input_.data_ptr(), input_.data_ptr(), 
-    #    input_.size()[0] * input_.size()[1], 
-    #    nccl.NCCL_HALF, 0, cuda.Stream.null.ptr)
+    assert (input_.dtype == torch.float16)
+    
+    torch.distributed.ncclcomm.allReduce(
+        input_.data_ptr(), input_.data_ptr(), 
+        input_.size()[0] * input_.size()[1], 
+        nccl.NCCL_HALF, 0, cuda.Stream.null.ptr)
 
     #torch.distributed.all_reduce(input_, group= get_tensor_model_parallel_group())
     
