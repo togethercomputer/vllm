@@ -274,6 +274,7 @@ class Scheduler:
         self,
         seq_outputs: Dict[int, SequenceOutputs],
     ) -> List[SequenceGroup]:
+
         scheduled: List[SequenceGroup] = []
         for seq_group in self.running:
             for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):

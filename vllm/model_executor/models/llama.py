@@ -46,7 +46,6 @@ from vllm.sequence import SequenceOutputs
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
-
 class LlamaMLP(nn.Module):
 
     def __init__(
@@ -255,12 +254,95 @@ class LlamaForCausalLM(nn.Module):
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
+        profile_model
     ) -> Dict[int, SequenceOutputs]:
+
+        if profile_model:
+            hidden_states = self.model(input_ids, positions, kv_caches,
+                                       input_metadata, cache_events)
+            next_tokens = self.sampler(self.lm_head.weight, hidden_states,
+                                       input_metadata)
+            return next_tokens
+
+        elif True or input_metadata.num_valid_tokens != input_metadata.num_generation_tokens:
+            # there exists a prompt that is not in the token generation 
+            # phase (i.e., it is in the promping phase)
+            #
+            hidden_states = self.model(input_ids, positions, kv_caches,
+                                       input_metadata, cache_events)
+            next_tokens = self.sampler(self.lm_head.weight, hidden_states,
+                                       input_metadata)
+            return next_tokens
+
+        else:
+
+            packed_tokens = []
+            for repeat in range(0, 5):
+                hidden_states = self.model(input_ids, positions, kv_caches,
+                                       input_metadata, cache_events)
+                next_tokens = self.sampler(self.lm_head.weight, hidden_states,
+                                       input_metadata)
+
+                rank = get_tensor_model_parallel_rank()
+                if rank == 0:
+                    import pdb 
+                    pdb.set_trace()
+
+                # now let's prepare the input_ids, positions, and input_metadata
+                # for the next round
+                input_tokens = []
+
+                for i in range(0, len(next_tokens)):
+                    seq = next_tokens[i]
+                    input_tokens.append(seq.output_token)
+                    positions[i] = positions[i] + 1
+
+                #    prompt_length = input_metadata.prompt_lens[i]
+                #    positions.append(prompt_length + 1)
+
+
+
+        """
+        # Optimization: Pad the input length to be a multiple of 8.
+        # This is required for utilizing the Tensor Cores in NVIDIA GPUs.
+        input_tokens = _pad_to_alignment(input_tokens, multiple_of=8)
+        input_positions = _pad_to_alignment(input_positions, multiple_of=8)
+
+        # Convert to tensors.
+        tokens_tensor = torch.cuda.LongTensor(input_tokens)
+        positions_tensor = torch.cuda.LongTensor(input_positions)
+        slot_mapping_tensor = torch.cuda.IntTensor(slot_mapping)
+        context_lens_tensor = torch.cuda.IntTensor(context_lens)
+        padded_block_tables = [
+            _pad_to_max(block_table, max_num_blocks_per_seq)
+            for block_table in generation_block_tables
+        ]
+        block_tables_tensor = torch.cuda.IntTensor(padded_block_tables)
+
+        seq_data: Dict[int, SequenceData] = {}
+        for seq_group_metadata in seq_group_metadata_list:
+            seq_data.update(seq_group_metadata.seq_data)
+
+        input_metadata = InputMetadata(
+            seq_groups=seq_groups,
+            seq_data=seq_data,
+            prompt_lens=prompt_lens,
+            slot_mapping=slot_mapping_tensor,
+            context_lens=context_lens_tensor,
+            max_context_len=max_context_len,
+            block_tables=block_tables_tensor,
+        )
+        return tokens_tensor, positions_tensor, input_metadata
+        """
+
+
+        """
         hidden_states = self.model(input_ids, positions, kv_caches,
                                    input_metadata, cache_events)
         next_tokens = self.sampler(self.lm_head.weight, hidden_states,
                                    input_metadata)
         return next_tokens
+        """
 
     _column_parallel_weights = [
         "embed_tokens.weight", "lm_head.weight", "qkv_proj.weight",

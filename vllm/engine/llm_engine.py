@@ -23,10 +23,19 @@ if ray:
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
 
+from vllm.model_executor.parallel_utils.parallel_state import (
+    get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
+
+import cupy
+from cupy import cuda
+from cupy.cuda import nccl
+from cupy import testing
+
+import torch
+
 logger = init_logger(__name__)
 
 _LOGGING_INTERVAL_SEC = 5
-
 
 class LLMEngine:
     """An LLM engine that receives requests and generates texts.
@@ -140,6 +149,21 @@ class LLMEngine:
         # before CUDA_VISIBLE_DEVICES is set in the Worker
         from vllm.worker.worker import Worker  # pylint: disable=import-outside-toplevel
 
+        """
+        self.workers: List[Worker] = []
+        for bundle in placement_group.bundle_specs:
+            if not bundle.get("GPU", 0):
+                continue
+            worker = ray.remote(
+                num_cpus=0,
+                num_gpus=1,
+                scheduling_strategy=PlacementGroupSchedulingStrategy(
+                    placement_group=placement_group,
+                    placement_group_capture_child_tasks=True),
+            )(RayWorker).remote()
+            self.workers.append(worker)
+        """
+
         self.workers: List[Worker] = []
         for bundle in placement_group.bundle_specs:
             if not bundle.get("GPU", 0):
@@ -158,6 +182,7 @@ class LLMEngine:
         model_config = copy.deepcopy(self.model_config)
         parallel_config = copy.deepcopy(self.parallel_config)
         scheduler_config = copy.deepcopy(self.scheduler_config)
+
         self._run_workers("init_worker",
                           get_all_outputs=True,
                           worker_init_fn=lambda: Worker(
@@ -216,6 +241,9 @@ class LLMEngine:
         # Initialize the cluster.
         distributed_init_method, placement_group = initialize_cluster(
             parallel_config)
+
+        parallel_config.comm_id = nccl.get_unique_id()
+
         # Create the LLM engine.
         engine = cls(*engine_configs,
                      distributed_init_method,
@@ -297,6 +325,8 @@ class LLMEngine:
         and updates the scheduler with the model outputs. Finally, it decodes
         the sequences and returns the newly generated results.
         """
+        import time
+        s = time.time()
         seq_group_metadata_list, scheduler_outputs = self.scheduler.schedule()
         if scheduler_outputs.is_empty():
             if not scheduler_outputs.ignored_seq_groups:
@@ -309,6 +339,7 @@ class LLMEngine:
                 for seq_group in scheduler_outputs.ignored_seq_groups
             ]
 
+        start = time.time()
         # Execute the model.
         output = self._run_workers(
             "execute_model",
@@ -317,6 +348,10 @@ class LLMEngine:
             blocks_to_swap_out=scheduler_outputs.blocks_to_swap_out,
             blocks_to_copy=scheduler_outputs.blocks_to_copy,
         )
+        end = time.time()
+
+        #print(output)
+
         # Update the scheduler with the model outputs.
         seq_groups = self.scheduler.update(output)
 
@@ -337,6 +372,10 @@ class LLMEngine:
             # Log the system stats.
             self._log_system_stats(scheduler_outputs.prompt_run,
                                    scheduler_outputs.num_batched_tokens)
+
+        #print("##", e2 - e1, e3 - e2)
+        e = time.time()
+        #print("MAIN   ", end-start, e - s)
         return request_outputs
 
     def _log_system_stats(
@@ -460,8 +499,10 @@ class LLMEngine:
         **kwargs,
     ) -> Any:
         """Runs the given method on all workers."""
+
         all_outputs = []
         for worker in self.workers:
+
             if self.parallel_config.worker_use_ray:
                 executor = partial(worker.execute_method.remote, method)
             else:
@@ -469,6 +510,7 @@ class LLMEngine:
 
             output = executor(*args, **kwargs)
             all_outputs.append(output)
+            e = time.time()
 
         if self.parallel_config.worker_use_ray:
             all_outputs = ray.get(all_outputs)

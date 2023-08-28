@@ -4,13 +4,19 @@
 
 import torch
 
+import cupy
+from cupy import cuda
+from cupy.cuda import nccl
+from cupy import testing
+
+import time
+
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
     get_tensor_model_parallel_group,
 )
 from .utils import split_tensor_along_last_dim
-
 
 def _reduce(input_):
     """All-reduce the input tensor across model parallel group."""
@@ -19,9 +25,22 @@ def _reduce(input_):
     if get_tensor_model_parallel_world_size()==1:
         return input_
 
-    # All-reduce.
-    torch.distributed.all_reduce(input_, group=get_tensor_model_parallel_group())
+    ## TODO: We are currently assuming that input_ has the type 
+    ## torch.float16. If it is different, we need to change 
+    ## nccl.NCCL_HALF
+    ## 
+    ## -- CZ
+    ##
 
+    #assert (input_.dtype == torch.float16)
+    #
+    #torch.distributed.ncclcomm.allReduce(
+    #    input_.data_ptr(), input_.data_ptr(), 
+    #    input_.size()[0] * input_.size()[1], 
+    #    nccl.NCCL_HALF, 0, cuda.Stream.null.ptr)
+
+    #torch.distributed.all_reduce(input_, group= get_tensor_model_parallel_group())
+    
     return input_
 
 

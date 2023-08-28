@@ -1,5 +1,7 @@
 """A GPU worker class."""
 import os
+import ray
+
 from typing import Dict, List, Tuple, Optional
 
 import torch
@@ -14,7 +16,13 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import SequenceData, SequenceGroupMetadata, SequenceOutputs
 from vllm.worker.cache_engine import CacheEngine
 from vllm.utils import get_gpu_memory
+from vllm.model_executor.parallel_utils.parallel_state import (
+    get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
 
+import cupy
+from cupy import cuda
+from cupy.cuda import nccl
+from cupy import testing
 
 class Worker:
     """A worker class that executes (a partition of) the model on a GPU.
@@ -111,6 +119,7 @@ class Worker:
             kv_caches=[(None, None)] * num_layers,
             input_metadata=input_metadata,
             cache_events=None,
+            profile_model=True
         )
 
         # Calculate the number of blocks that can be allocated with the
@@ -253,6 +262,7 @@ class Worker:
         )
         return tokens_tensor, positions_tensor, input_metadata
 
+    @ray.method(concurrency_group="io")
     @torch.inference_mode()
     def execute_model(
         self,
@@ -261,6 +271,12 @@ class Worker:
         blocks_to_swap_out: Dict[int, int],
         blocks_to_copy: Dict[int, List[int]],
     ) -> Dict[int, SequenceOutputs]:
+
+        import time
+        #tensor_model_parallel_rank = get_tensor_model_parallel_rank()
+
+        e1 = time.time()
+
         # Issue cache operations.
         issued_cache_op = False
         if blocks_to_swap_in:
@@ -289,6 +305,15 @@ class Worker:
         input_tokens, input_positions, input_metadata = self._prepare_inputs(
             seq_group_metadata_list)
 
+        #rank = get_tensor_model_parallel_rank()
+        #if rank == 0:
+        #    print("-------------------")
+        #    print("###", seq_group_metadata_list)
+        #    print("###", input_tokens)
+        #    print("###", input_positions)
+        #    print("###", input_metadata)
+        #    print("-------------------")
+
         # Execute the model.
         output = self.model(
             input_ids=input_tokens,
@@ -296,7 +321,17 @@ class Worker:
             kv_caches=self.gpu_cache,
             input_metadata=input_metadata,
             cache_events=cache_events,
+            profile_model=False
         )
+
+        e2 = time.time()
+
+        #rank = get_tensor_model_parallel_rank()
+        #print(rank, e2-e1)
+
+        #if tensor_model_parallel_rank == 0:
+        #    print("*", e2-e1)
+        #    print("*")
         return output
 
 
@@ -305,6 +340,13 @@ def _init_distributed_environment(
     rank: int,
     distributed_init_method: Optional[str] = None,
 ) -> None:
+
+    #print("####", parallel_config.comm_id)
+    #print("####", cuda.Device())
+
+    torch.distributed.ncclcomm = nccl.NcclCommunicator(torch.distributed.get_world_size(), 
+        parallel_config.comm_id, rank)
+
     """Initialize the distributed environment."""
     if torch.distributed.is_initialized():
         torch_world_size = torch.distributed.get_world_size()
@@ -318,11 +360,12 @@ def _init_distributed_environment(
             "distributed_init_method must be set if torch.distributed "
             "is not already initialized")
     else:
+
         torch.distributed.init_process_group(
             backend="nccl",
             world_size=parallel_config.world_size,
             rank=rank,
-            init_method=distributed_init_method,
+            init_method=distributed_init_method
         )
 
     # A small all_reduce for warmup.
