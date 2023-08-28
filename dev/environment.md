@@ -13,6 +13,12 @@ Then start docker:
 sudo docker run --gpus all -it --rm --shm-size=24g -v ~/vllm:/workspace/vllm  nvcr.io/nvidia/pytorch:22.12-py3
 ```
 
+or 
+
+```
+sudo docker run --gpus all -it --rm --shm-size=5g --network host -v ~/vllm:/workspace/vllm nvidia/cuda:12.2.0-devel-ubuntu20.04
+```
+
 Upgrade vllm to latest version
 ```
 pip install --upgrade pip
