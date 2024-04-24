@@ -79,7 +79,7 @@ def test_guided_logits_processors():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ["outlines", "lm-format-enforcer"])
+@pytest.mark.parametrize("backend", ["outlines"])
 async def test_guided_logits_processor_black_box(backend: str):
     tokenizer = AutoTokenizer.from_pretrained('HuggingFaceH4/zephyr-7b-beta')
     token_ids = tokenizer.encode(

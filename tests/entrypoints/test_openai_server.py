@@ -507,7 +507,7 @@ async def test_logits_bias(server, client: openai.AsyncOpenAI):
 
 
 @pytest.mark.parametrize("guided_decoding_backend",
-                         ["outlines", "lm-format-enforcer"])
+                         ["outlines"])
 async def test_guided_json_completion(server, client: openai.AsyncOpenAI,
                                       guided_decoding_backend: str):
     completion = await client.completions.create(
@@ -529,7 +529,7 @@ async def test_guided_json_completion(server, client: openai.AsyncOpenAI,
 
 
 @pytest.mark.parametrize("guided_decoding_backend",
-                         ["outlines", "lm-format-enforcer"])
+                         ["outlines"])
 async def test_guided_json_chat(server, client: openai.AsyncOpenAI,
                                 guided_decoding_backend: str):
     messages = [{
@@ -575,7 +575,7 @@ async def test_guided_json_chat(server, client: openai.AsyncOpenAI,
 
 
 @pytest.mark.parametrize("guided_decoding_backend",
-                         ["outlines", "lm-format-enforcer"])
+                         ["outlines"])
 async def test_guided_regex_completion(server, client: openai.AsyncOpenAI,
                                        guided_decoding_backend: str):
     completion = await client.completions.create(
@@ -595,7 +595,7 @@ async def test_guided_regex_completion(server, client: openai.AsyncOpenAI,
 
 
 @pytest.mark.parametrize("guided_decoding_backend",
-                         ["outlines", "lm-format-enforcer"])
+                         ["outlines"])
 async def test_guided_regex_chat(server, client: openai.AsyncOpenAI,
                                  guided_decoding_backend: str):
     messages = [{
@@ -632,7 +632,7 @@ async def test_guided_regex_chat(server, client: openai.AsyncOpenAI,
 
 
 @pytest.mark.parametrize("guided_decoding_backend",
-                         ["outlines", "lm-format-enforcer"])
+                         ["outlines"])
 async def test_guided_choice_completion(server, client: openai.AsyncOpenAI,
                                         guided_decoding_backend: str):
     completion = await client.completions.create(
@@ -651,7 +651,7 @@ async def test_guided_choice_completion(server, client: openai.AsyncOpenAI,
 
 
 @pytest.mark.parametrize("guided_decoding_backend",
-                         ["outlines", "lm-format-enforcer"])
+                         ["outlines"])
 async def test_guided_choice_chat(server, client: openai.AsyncOpenAI,
                                   guided_decoding_backend: str):
     messages = [{
@@ -689,7 +689,7 @@ async def test_guided_choice_chat(server, client: openai.AsyncOpenAI,
 
 
 @pytest.mark.parametrize("guided_decoding_backend",
-                         ["outlines", "lm-format-enforcer"])
+                         ["outlines"])
 async def test_guided_decoding_type_error(server, client: openai.AsyncOpenAI,
                                           guided_decoding_backend: str):
     with pytest.raises(openai.BadRequestError):

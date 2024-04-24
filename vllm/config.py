@@ -1019,11 +1019,11 @@ def _get_and_verify_max_len(
 class DecodingConfig:
     """Dataclass which contains the decoding strategy of the engine"""
 
-    # Which guided decoding algo to use. 'outlines' / 'lm-format-enforcer'
+    # Which guided decoding algo to use. 'outlines'
     guided_decoding_backend: str = 'outlines'
 
     def __post_init__(self):
-        valid_guided_backends = ['outlines', 'lm-format-enforcer']
+        valid_guided_backends = ['outlines']
         backend = self.guided_decoding_backend
         if backend not in valid_guided_backends:
             raise ValueError(f"Invalid guided_decoding_backend '{backend},"

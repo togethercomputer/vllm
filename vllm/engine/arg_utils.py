@@ -192,7 +192,7 @@ class EngineArgs:
             '--guided-decoding-backend',
             type=str,
             default='outlines',
-            choices=['outlines', 'lm-format-enforcer'],
+            choices=['outlines'],
             help='Which engine will be used for guided decoding'
             ' (JSON schema / regex etc)')
         # Parallel arguments
