@@ -343,6 +343,22 @@ class Gemma4ToolParser(ToolParser):
             re.DOTALL,
         )
 
+        # Thinking-channel markers. When the serving layer considers
+        # reasoning ended (e.g. enable_thinking=false places <channel|> at
+        # the end of the prompt), every delta is routed to this parser —
+        # but Gemma4 may still emit <|channel>thought\n...<channel|> blocks
+        # (e.g. before a tool call). With skip_special_tokens=False those
+        # markers appear literally in delta_text and must not leak into
+        # content.
+        self.channel_start_token = "<|channel>"
+        self.channel_end_token = "<channel|>"
+        self._channel_marker_re = re.compile(
+            "({}|{})".format(
+                re.escape(self.channel_start_token),
+                re.escape(self.channel_end_token),
+            )
+        )
+
         # Streaming state — reset per-request via _reset_streaming_state()
         self._reset_streaming_state()
 
@@ -355,6 +371,87 @@ class Gemma4ToolParser(ToolParser):
         self.current_tool_name_sent = False
         self.prev_tool_call_arr: list[dict] = []
         self.streamed_args_for_tool: list[str] = []
+        # Thinking-channel routing state.
+        self._in_channel = False
+        self._channel_label_buf: str | None = None
+        # Gemma4 sometimes emits a bare "thought\n" label with no channel
+        # markers at a block boundary (google's response_schema models this
+        # as an optional leading "(thought)?"). Buffer content at
+        # boundaries (stream start / right after <channel|>) so the bare
+        # label can be stripped; None = past the boundary.
+        self._content_label_buf: str | None = ""
+
+    # ------------------------------------------------------------------
+    # Thinking-channel routing for content deltas
+    # ------------------------------------------------------------------
+
+    _THOUGHT_LABEL = "thought\n"
+
+    def _route_channel_text(self, text: str) -> DeltaMessage | None:
+        """Split content text on thinking-channel markers.
+
+        Marker text is consumed, in-channel text goes to ``reasoning``
+        (with the ``thought\\n`` role label stripped, buffered across
+        deltas), out-of-channel text goes to ``content``. A stray
+        ``<channel|>`` with no opener is dropped silently.
+        """
+        reasoning_parts: list[str] = []
+        content_parts: list[str] = []
+        for segment in self._channel_marker_re.split(text):
+            if segment == self.channel_start_token:
+                self._in_channel = True
+                self._channel_label_buf = ""
+            elif segment == self.channel_end_token:
+                if self._channel_label_buf:
+                    reasoning_parts.append(self._channel_label_buf)
+                self._in_channel = False
+                self._channel_label_buf = None
+                # New block boundary: re-arm bare-label stripping.
+                self._content_label_buf = ""
+            elif segment:
+                if not self._in_channel:
+                    if self._content_label_buf is None:
+                        content_parts.append(segment)
+                    else:
+                        # At a block boundary: strip a bare "thought\n"
+                        # label (buffered across deltas).
+                        self._content_label_buf += segment
+                        if self._content_label_buf.startswith(
+                            self._THOUGHT_LABEL
+                        ):
+                            remainder = self._content_label_buf[
+                                len(self._THOUGHT_LABEL) :
+                            ]
+                            if remainder:
+                                content_parts.append(remainder)
+                            self._content_label_buf = None
+                        elif not self._THOUGHT_LABEL.startswith(
+                            self._content_label_buf
+                        ):
+                            content_parts.append(self._content_label_buf)
+                            self._content_label_buf = None
+                elif self._channel_label_buf is None:
+                    reasoning_parts.append(segment)
+                else:
+                    self._channel_label_buf += segment
+                    if self._channel_label_buf.startswith(self._THOUGHT_LABEL):
+                        remainder = self._channel_label_buf[
+                            len(self._THOUGHT_LABEL) :
+                        ]
+                        if remainder:
+                            reasoning_parts.append(remainder)
+                        self._channel_label_buf = None
+                    elif not self._THOUGHT_LABEL.startswith(
+                        self._channel_label_buf
+                    ):
+                        reasoning_parts.append(self._channel_label_buf)
+                        self._channel_label_buf = None
+
+        reasoning = "".join(reasoning_parts)
+        content = "".join(content_parts)
+        if not reasoning and not content:
+            return None
+        return DeltaMessage(reasoning=reasoning or None, content=content or None)
 
     def adjust_request(
         self, request: ChatCompletionRequest | ResponsesRequest
@@ -438,6 +535,10 @@ class Gemma4ToolParser(ToolParser):
             # Content = text before first tool call (if any)
             content_end = model_output.find(self.tool_call_start_token)
             content = model_output[:content_end].strip() if content_end > 0 else None
+            # Strip a bare "thought\n" label at the start (google's
+            # response_schema models this as optional leading scaffold).
+            if content and content.startswith(self._THOUGHT_LABEL):
+                content = content[len(self._THOUGHT_LABEL) :].strip()
 
             return ExtractedToolCallInformation(
                 tools_called=True,
@@ -473,9 +574,11 @@ class Gemma4ToolParser(ToolParser):
         # duplicated into "<<div>" when a tool call just ended.
 
         # If no tool call token seen yet, emit as content
+        # (routed through the thinking-channel splitter so channel
+        # markers never leak into content)
         if self.tool_call_start_token not in current_text:
             if delta_text:
-                return DeltaMessage(content=delta_text)
+                return self._route_channel_text(delta_text)
             return None
 
         try:
@@ -508,13 +611,14 @@ class Gemma4ToolParser(ToolParser):
         prev_end_count = previous_text.count(self.tool_call_end_token)
 
         # Case 1: Not inside any tool call — emit as content
+        # (routed through the thinking-channel splitter)
         if (
             start_count == end_count
             and prev_end_count == end_count
             and self.tool_call_end_token not in delta_text
         ):
             if delta_text:
-                return DeltaMessage(content=delta_text)
+                return self._route_channel_text(delta_text)
             return None
 
         # Case 2: Starting a new tool call
@@ -539,11 +643,12 @@ class Gemma4ToolParser(ToolParser):
             return self._handle_tool_call_middle(current_text)
 
         # Default: generate text outside tool calls
+        # (routed through the thinking-channel splitter)
         if delta_text:
             text = delta_text.replace(self.tool_call_start_token, "")
             text = text.replace(self.tool_call_end_token, "")
             if text:
-                return DeltaMessage(content=text)
+                return self._route_channel_text(text)
         return None
 
     def _extract_partial_call(self, current_text: str) -> tuple[str | None, str]:

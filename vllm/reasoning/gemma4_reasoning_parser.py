@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import re
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
@@ -26,9 +27,7 @@ class Gemma4ReasoningParser(BaseThinkingReasoningParser):
 
     Gemma4 uses <|channel>...<channel|> tokens to delimit reasoning/thinking
     content within its output. Thinking mode is activated by passing
-    ``enable_thinking=True`` in the chat template kwargs, which injects a
-    system turn containing <|think|> (token 98) to trigger chain-of-thought
-    reasoning.
+    ``enable_thinking=True`` in the chat template kwargs.
 
     Output pattern when thinking is enabled::
 
@@ -36,25 +35,48 @@ class Gemma4ReasoningParser(BaseThinkingReasoningParser):
         ...chain of thought reasoning...<channel|>
         Final answer text here.
 
-    The ``thought\\n`` role label inside the channel delimiters is a
-    structural artefact (analogous to ``user\\n`` in ``<|turn>user\\n...``).
-    This parser strips it so that downstream consumers see only the
-    actual reasoning text, consistent with the offline parser
-    (``vllm.reasoning.gemma4_utils._strip_thought_label``).
+    Streaming uses a marker-driven state machine instead of the base
+    class's previous/delta token-id branch logic. The base logic breaks on
+    real Gemma4 streams in two ways (both leak marker text into
+    ``delta.content`` because ``adjust_request`` forces
+    ``skip_special_tokens=False`` so marker text is present in
+    ``delta_text``):
+
+    1. A stray ``<channel|>`` with no opener hits the base "no start token"
+       branch and is emitted verbatim as content (the single-special-token
+       skip misses it whenever the detokenizer batches it with adjacent
+       tokens).
+    2. After the first thought block closes, the base
+       "start-in-previous, end-in-previous" branch passes every subsequent
+       delta to content verbatim - including the *second* thought block
+       Gemma4 emits before tool calls.
+
+    The state machine consumes marker text, routes text inside a channel to
+    ``reasoning`` and outside to ``content``, strips the ``thought\\n`` role
+    label at the start of every block (buffering across delta boundaries),
+    and silently drops stray end markers. Multiple blocks per response and
+    multiple markers per delta are handled.
     """
 
     def __init__(self, tokenizer: TokenizerLike, *args, **kwargs):
         super().__init__(tokenizer, *args, **kwargs)
-        # Instance state for streaming prefix stripping.
-        # Tracks only the reasoning text received from the base parser,
-        # independent of current_text (which may contain pre-reasoning
-        # content and lacks special token text due to
-        # skip_special_tokens=True).
-        self._reasoning_text: str = ""
-        self._prefix_stripped: bool = False
+        # Streaming state.
+        self._in_thought: bool = False
+        # Buffer for label stripping at the start of the current block;
+        # None means the label for this block was already resolved.
+        self._label_buf: str | None = None
+        # Gemma4 sometimes emits a bare "thought\n" label with no channel
+        # markers at a block boundary (google's response_schema models this
+        # as an optional leading "(thought)?"). Buffer content at
+        # boundaries (stream start / right after <channel|>) so the bare
+        # label can be stripped; None = past the boundary.
+        self._content_label_buf: str | None = ""
         self.new_turn_token_id = self.vocab["<|turn>"]
         self.tool_call_token_id = self.vocab["<|tool_call>"]
         self.tool_response_token_id = self.vocab["<|tool_response>"]
+        self._marker_re = re.compile(
+            "({}|{})".format(re.escape(self.start_token), re.escape(self.end_token))
+        )
 
     def adjust_request(
         self, request: "ChatCompletionRequest | ResponsesRequest"
@@ -105,15 +127,40 @@ class Gemma4ReasoningParser(BaseThinkingReasoningParser):
         model_output: str,
         request: "ChatCompletionRequest | ResponsesRequest",
     ) -> tuple[str | None, str | None]:
-        """Extract reasoning, stripping the ``thought\\n`` role label."""
+        """Extract reasoning, stripping the ``thought\\n`` role label.
+
+        Handles multiple thought blocks (Gemma4 may emit a second block
+        before a tool call): all in-channel text is concatenated into
+        ``reasoning``, all out-of-channel text into ``content``.
+        """
         if self.start_token not in model_output and self.end_token not in model_output:
             # Default to content history if no tags are present
             # (or if they were stripped)
             return None, model_output
 
-        reasoning, content = super().extract_reasoning(model_output, request)
-        if reasoning is not None:
-            reasoning = _strip_thought_label(reasoning)
+        reasoning_parts: list[str] = []
+        content_parts: list[str] = []
+        in_thought = False
+        at_boundary = True
+        for segment in self._marker_re.split(model_output):
+            if segment == self.start_token:
+                in_thought = True
+            elif segment == self.end_token:
+                in_thought = False
+                at_boundary = True
+            elif segment:
+                if in_thought:
+                    reasoning_parts.append(_strip_thought_label(segment))
+                else:
+                    # Strip a bare "thought\n" label at block boundaries
+                    # (output start / right after <channel|>).
+                    if at_boundary:
+                        segment = _strip_thought_label(segment)
+                        at_boundary = False
+                    if segment:
+                        content_parts.append(segment)
+        reasoning = "".join(reasoning_parts) or None
+        content = "".join(content_parts) or None
         return reasoning, content
 
     # ------------------------------------------------------------------
@@ -129,89 +176,79 @@ class Gemma4ReasoningParser(BaseThinkingReasoningParser):
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
     ) -> DeltaMessage | None:
-        """Extract streaming reasoning, stripping ``thought\\n`` from the
-        first reasoning delta(s).
+        """Marker-driven streaming split of ``delta_text``.
 
-        The ``thought\\n`` prefix may arrive as a single delta or split
-        across multiple deltas (e.g. ``"thought"`` then ``"\\n"``). We
-        buffer early reasoning tokens until we can determine whether the
-        prefix is present, then emit the buffered content minus the
-        prefix.
-
-        Unlike the previous implementation which reconstructed accumulated
-        reasoning from ``current_text``, this uses instance state
-        (``_reasoning_text``) to track only the reasoning content returned
-        by the base parser. This is necessary because
-        ``skip_special_tokens=True`` (the vLLM default) causes the
-        ``<|channel>`` delimiter to be invisible in ``current_text``,
-        making it impossible to separate pre-reasoning content from
-        reasoning content via string matching.
+        ``skip_special_tokens=False`` (forced by ``adjust_request``)
+        guarantees the channel markers appear literally in ``delta_text``,
+        and each marker is a single token so its text never splits across
+        deltas. The ``thought\\n`` role label is multi-token, so it is
+        buffered until it can be confirmed or ruled out.
         """
-        result = super().extract_reasoning_streaming(
-            previous_text,
-            current_text,
-            delta_text,
-            previous_token_ids,
-            current_token_ids,
-            delta_token_ids,
-        )
-        if result is None:
+        if not delta_text:
             return None
 
-        if result.reasoning is None:
-            return result
+        reasoning_parts: list[str] = []
+        content_parts: list[str] = []
 
-        # Accumulate ONLY the reasoning text from base parser results.
-        # This is immune to pre-reasoning content pollution.
-        self._reasoning_text += result.reasoning
-
-        # Once the prefix has been handled, all subsequent reasoning
-        # deltas pass through unchanged.
-        if self._prefix_stripped:
-            return result
-
-        # ---- Prefix stripping logic ----
-
-        # Case 1: We've accumulated enough to confirm the prefix is
-        # present. Strip it and pass through the remainder.
-        if self._reasoning_text.startswith(_THOUGHT_PREFIX):
-            prefix_len = len(_THOUGHT_PREFIX)
-            # How much reasoning was accumulated before this delta?
-            prev_reasoning_len = len(self._reasoning_text) - len(result.reasoning)
-            if prev_reasoning_len >= prefix_len:
-                # Prefix was already consumed by prior deltas; this
-                # delta is entirely real content — pass through.
-                self._prefix_stripped = True
-                return result
-            else:
-                # Part or all of the prefix is in this delta.
-                chars_of_prefix_in_delta = prefix_len - prev_reasoning_len
-                stripped = result.reasoning[chars_of_prefix_in_delta:]
-                if stripped:
-                    self._prefix_stripped = True
-                    result.reasoning = stripped
-                    return result
+        for segment in self._marker_re.split(delta_text):
+            if segment == self.start_token:
+                self._in_thought = True
+                self._label_buf = ""
+            elif segment == self.end_token:
+                # Flush an unresolved label buffer: the block ended before
+                # the label diverged (e.g. reasoning text was exactly
+                # "thought"), so it was real reasoning text after all.
+                if self._label_buf:
+                    reasoning_parts.append(self._label_buf)
+                self._in_thought = False
+                self._label_buf = None
+                # New block boundary: re-arm bare-label stripping.
+                self._content_label_buf = ""
+            elif segment:
+                if not self._in_thought:
+                    if self._content_label_buf is None:
+                        content_parts.append(segment)
+                    else:
+                        # At a block boundary: strip a bare "thought\n"
+                        # label (buffered across deltas).
+                        self._content_label_buf += segment
+                        if self._content_label_buf.startswith(_THOUGHT_PREFIX):
+                            remainder = self._content_label_buf[
+                                len(_THOUGHT_PREFIX) :
+                            ]
+                            if remainder:
+                                content_parts.append(remainder)
+                            self._content_label_buf = None
+                        elif not _THOUGHT_PREFIX.startswith(
+                            self._content_label_buf
+                        ):
+                            content_parts.append(self._content_label_buf)
+                            self._content_label_buf = None
+                elif self._label_buf is None:
+                    # Label for this block already resolved.
+                    reasoning_parts.append(segment)
                 else:
-                    if len(self._reasoning_text) >= prefix_len:
-                        self._prefix_stripped = True
-                        result.reasoning = ""
-                        return result
-                    return None
+                    self._label_buf += segment
+                    if self._label_buf.startswith(_THOUGHT_PREFIX):
+                        # Label confirmed: emit whatever follows it.
+                        remainder = self._label_buf[len(_THOUGHT_PREFIX) :]
+                        if remainder:
+                            reasoning_parts.append(remainder)
+                        self._label_buf = None
+                    elif not _THOUGHT_PREFIX.startswith(self._label_buf):
+                        # Diverged: not a label, emit everything buffered.
+                        reasoning_parts.append(self._label_buf)
+                        self._label_buf = None
+                    # else: still a strict prefix of the label - keep
+                    # buffering across deltas.
 
-        # Case 2: Accumulated text is a strict prefix of
-        # _THOUGHT_PREFIX (e.g. we've only seen "thou" so far).
-        # Buffer by suppressing — we can't yet tell if this will
-        # become the full prefix or diverge.
-        if _THOUGHT_PREFIX.startswith(self._reasoning_text):
+        reasoning = "".join(reasoning_parts)
+        content = "".join(content_parts)
+        if not reasoning and not content:
             return None
-
-        # Case 3: Accumulated text doesn't match the thought prefix
-        # at all. This means prior deltas were buffered (suppressed
-        # by Case 2) but the text diverged. Re-emit the full
-        # accumulated text to avoid data loss.
-        self._prefix_stripped = True
-        result.reasoning = self._reasoning_text
-        return result
+        return DeltaMessage(
+            reasoning=reasoning or None, content=content or None
+        )
 
 
 def _strip_thought_label(text: str) -> str:
