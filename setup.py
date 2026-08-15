@@ -1532,7 +1532,7 @@ setup(
         #   - .buildkite/test-amd.yaml
         "helion": ["helion==1.4.0"],
         # Optional deps for gRPC server (vllm serve --grpc)
-        "grpc": ["smg-grpc-servicer[vllm] >= 0.5.2"],
+        "grpc": ["smg-grpc-servicer[vllm] >= 0.5.3"],
         # Optional deps for OpenTelemetry tracing
         "otel": [
             "opentelemetry-sdk>=1.26.0",

@@ -29,6 +29,7 @@ try:
     from grpc_health.v1 import health_pb2_grpc
     from grpc_reflection.v1alpha import reflection
     from smg_grpc_proto import vllm_engine_pb2, vllm_engine_pb2_grpc
+    from smg_grpc_servicer.grpc_options import max_ping_strikes
     from smg_grpc_servicer.vllm.health_servicer import VllmHealthServicer
     from smg_grpc_servicer.vllm.servicer import VllmEngineServicer
 except ImportError as e:
@@ -51,6 +52,21 @@ from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
+
+
+def _grpc_server_options():
+    return [
+        ("grpc.max_send_message_length", -1),
+        ("grpc.max_receive_message_length", -1),
+        # Tolerate client keepalive pings every 10s (default 300s is too
+        # strict for non-streaming requests where no DATA frames flow
+        # during generation).
+        ("grpc.http2.min_recv_ping_interval_without_data_ms", 10000),
+        ("grpc.keepalive_permit_without_calls", True),
+        # Zero disables ping-strike enforcement so a long non-streaming
+        # generation cannot lose its gRPC connection to a GOAWAY.
+        ("grpc.http2.max_ping_strikes", max_ping_strikes()),
+    ]
 
 
 async def serve_grpc(args: argparse.Namespace):
@@ -86,15 +102,7 @@ async def serve_grpc(args: argparse.Namespace):
 
     # Create gRPC server
     server = grpc.aio.server(
-        options=[
-            ("grpc.max_send_message_length", -1),
-            ("grpc.max_receive_message_length", -1),
-            # Tolerate client keepalive pings every 10s (default 300s is too
-            # strict for non-streaming requests where no DATA frames flow
-            # during generation)
-            ("grpc.http2.min_recv_ping_interval_without_data_ms", 10000),
-            ("grpc.keepalive_permit_without_calls", True),
-        ],
+        options=_grpc_server_options(),
     )
 
     # Add servicer to server
